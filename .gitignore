@@ -1,27 +1,32 @@
-**/__pycache__
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
 IsaacGymEnvs/
-**/runs
-**/wandb
-**/b1-*
+**/runs/
+**/wandb/
+**/b1-*/
 */test_script.py
 .vscode/
-**/graphics_images
-**/logs
-**/exps
+**/graphics_images/
+**/logs/
+**/exps/
 **/test_only.py
 **/test.py
-**/imgs
+**/imgs/
 # **/*.png
 # **/*.jpg
-**/recorded_frames
+**/recorded_frames/
 **events*
 **/*.pt
 **/*.log
-**/.idea
-**/*.egg-info
-**/.pytest_cache
-**/.vscode
-**/legged_gym/logs
+**/.idea/
+**/*.egg-info/
+**/.pytest_cache/
+**/.vscode/
+**/legged_gym/logs/
+low-level/logs/
+low-level/legged_gym/envs/logs/
 
 # Node artifact files
 node_modules/
