@@ -45,16 +45,31 @@ def train(args):
         os.makedirs(log_pth)
     except:
         pass
+    # Decide wandb mode: prefer --debug, then WANDB_MODE env, otherwise online
+    wandb_mode_env = os.getenv("WANDB_MODE", None)
     if args.debug:
         mode = "disabled"
         args.rows = 6
         args.cols = 2
         args.num_envs = 128
+    elif wandb_mode_env in ("disabled", "offline", "online"):
+        mode = wandb_mode_env
     else:
         mode = "online"
-    wandb.init(project=args.proj_name, name=args.exptid, mode=mode, dir=LEGGED_GYM_ENVS_DIR +"/logs")
-    wandb.save(LEGGED_GYM_ENVS_DIR + "/manip_loco/b1z1_config.py", policy="now")
-    wandb.save(LEGGED_GYM_ENVS_DIR + "/manip_loco/manip_loco.py", policy="now")
+
+    # Initialize wandb safely with timeout and fallback
+    try:
+        settings = wandb.Settings(init_timeout=120)
+        wandb.init(project=args.proj_name, name=args.exptid, mode=mode, dir=LEGGED_GYM_ENVS_DIR +"/logs", settings=settings)
+        if wandb.run is not None and mode != "disabled":
+            wandb.save(LEGGED_GYM_ENVS_DIR + "/manip_loco/b1z1_config.py", policy="now")
+            wandb.save(LEGGED_GYM_ENVS_DIR + "/manip_loco/manip_loco.py", policy="now")
+    except Exception as e:
+        print(f"[WARN] wandb init failed ({e}). Disabling wandb and continuing.")
+        try:
+            wandb.init(project=args.proj_name, name=args.exptid, mode="disabled", dir=LEGGED_GYM_ENVS_DIR +"/logs")
+        except Exception:
+            pass
 
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     ppo_runner, train_cfg, _ = task_registry.make_alg_runner(log_root = log_pth, env=env, name=args.task, args=args)
