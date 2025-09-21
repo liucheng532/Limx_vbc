@@ -327,25 +327,33 @@ class Limx_rewards:
     # ----------------- Bipedal Gait Control Rewards -----------------
     def _reward_tracking_contacts_shaped_force(self):
         if not self.env.cfg.env.observe_gait_commands:
-            return torch.zeros(self.env.num_envs, device=self.env.device), torch.zeros(self.env.num_envs, device=self.env.device)
+            z = torch.zeros(self.env.num_envs, device=self.env.device)
+            return z, z
         foot_forces = torch.norm(self.env.contact_forces[:, self.env.feet_indices, :], dim=-1)
         desired_contact = self.env.desired_contact_states
         reward = 0
         for i in range(2):
-            reward += - (1 - desired_contact[:, i]) * (
-                        1 - torch.exp(-1 * foot_forces[:, i] ** 2 / self.env.cfg.rewards.gait_force_sigma))
-        return reward / 2, reward / 2
+            # 当期望接触(=1)时，如果力小则惩罚（返回正数，系数应为负），当期望悬空(=0)时，如果力大则惩罚
+            on_err = desired_contact[:, i] * (1 - torch.exp(-foot_forces[:, i] ** 2 / self.env.cfg.rewards.gait_force_sigma))
+            off_err = (1 - desired_contact[:, i]) * (1 - torch.exp(-foot_forces[:, i] ** 2 / self.env.cfg.rewards.gait_force_sigma))
+            reward += on_err + off_err
+        reward = reward / 2
+        return reward, reward
 
     def _reward_tracking_contacts_shaped_vel(self):
         if not self.env.cfg.env.observe_gait_commands:
-            return torch.zeros(self.env.num_envs, device=self.env.device), torch.zeros(self.env.num_envs, device=self.env.device)
+            z = torch.zeros(self.env.num_envs, device=self.env.device)
+            return z, z
         foot_velocities = torch.norm(self.env.foot_velocities, dim=2).view(self.env.num_envs, -1)
         desired_contact = self.env.desired_contact_states
         reward = 0
         for i in range(2):
-            reward += - (desired_contact[:, i] * (
-                        1 - torch.exp(-1 * foot_velocities[:, i] ** 2 / self.env.cfg.rewards.gait_vel_sigma)))
-        return reward / 2, reward / 2
+            # 期望接触(=1)时，脚速度应小；期望悬空(=0)时速度应大（反向约束使用误差形式仍为正）
+            on_err = desired_contact[:, i] * (1 - torch.exp(-foot_velocities[:, i] ** 2 / self.env.cfg.rewards.gait_vel_sigma))
+            off_err = (1 - desired_contact[:, i]) * 0.0  # 允许摆动时高速，不加惩罚
+            reward += on_err + off_err
+        reward = reward / 2
+        return reward, reward
 
     def _reward_feet_air_time(self):
         # Reward long steps (2 feet for bipedal)

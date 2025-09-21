@@ -64,9 +64,9 @@ class LimxRobot(LeggedRobot):
         dpos = self.curr_ee_goal_cart_world - self.ee_pos
         drot = orientation_error(self.ee_goal_orn_quat, self.ee_orn / torch.norm(self.ee_orn, dim=-1).unsqueeze(-1))
         dpose = torch.cat([dpos, drot], -1).unsqueeze(-1)
-        arm_pos_targets = self._control_ik(dpose) + self.dof_pos[:, :6]  # Arm joints are first 6
-        all_pos_targets = torch.zeros_like(self.dof_pos)
-        all_pos_targets[:, :6] = arm_pos_targets
+        arm_pos_targets = self._control_ik(dpose) + self.dof_pos[:, self.arm_dof_indices]
+        all_pos_targets = self.dof_pos.clone()
+        all_pos_targets[:, self.arm_dof_indices] = arm_pos_targets
 
         for t in range(self.cfg.control.decimation):
             self.torques = self._compute_torques(self.actions)
@@ -164,7 +164,7 @@ class LimxRobot(LeggedRobot):
             self.episode_sums["termination"] += rew
             self.episode_metric_sums["termination"] += metric
         
-        self.rew_buf /= 100
+        # 去除全局缩放，避免奖励过小导致学习停滞
 
         # Arm rewards
         self.arm_rew_buf[:] = 0.
@@ -185,7 +185,7 @@ class LimxRobot(LeggedRobot):
             self.episode_sums["arm_termination"] += rew
             self.episode_metric_sums["arm_termination"] += metric
 
-        self.arm_rew_buf /= 100
+        # 去除全局缩放，同上
 
     def compute_observations(self):
         """ Computes observations """
@@ -424,16 +424,26 @@ class LimxRobot(LeggedRobot):
         self.num_bodies = self.gym.get_asset_rigid_body_count(robot_asset)
         dof_props_asset = self.gym.get_asset_dof_properties(robot_asset)
         
-        # Set arm joints (J1-J6, indices 0-5) to position control
-        dof_props_asset['driveMode'][:6].fill(gymapi.DOF_MODE_POS)
-        dof_props_asset['stiffness'][:6].fill(400.0)
-        dof_props_asset['damping'][:6].fill(40.0)
+        # Map arm joints by name (robust to URDF joint ordering)
+        arm_joint_names = ["J1", "J2", "J3", "J4", "J5", "J6"]
+        # Names/dicts will be available after load_asset; defer indices until after we fetch dof names
         
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(robot_asset)
         self.body_names = self.gym.get_asset_rigid_body_names(robot_asset)
         self.body_names_to_idx = self.gym.get_asset_rigid_body_dict(robot_asset)
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
         self.dof_names_to_idx = self.gym.get_asset_dof_dict(robot_asset)
+
+        # Build arm/leg dof indices by name
+        self.arm_dof_indices = torch.tensor([self.dof_names.index(n) for n in arm_joint_names], dtype=torch.long)
+        all_indices = set(range(self.num_dofs))
+        leg_indices_list = [i for i in all_indices if i not in set(self.arm_dof_indices.tolist())]
+        assert len(leg_indices_list) == 8, f"Expected 8 leg dofs, got {len(leg_indices_list)}. Names: {self.dof_names}"
+        self.leg_dof_indices = torch.tensor(leg_indices_list, dtype=torch.long)
+        # Set arm joints to position control
+        dof_props_asset['driveMode'][self.arm_dof_indices.numpy()].fill(gymapi.DOF_MODE_POS)
+        dof_props_asset['stiffness'][self.arm_dof_indices.numpy()].fill(400.0)
+        dof_props_asset['damping'][self.arm_dof_indices.numpy()].fill(40.0)
         
         # Find feet (ankle links for bipedal robot)
         feet_names = [s for s in self.body_names if self.cfg.asset.foot_name in s]
@@ -545,14 +555,13 @@ class LimxRobot(LeggedRobot):
 
         self.friction_coeffs_tensor = self.friction_coeffs.to(self.device).squeeze(-1)
 
-        # Motor strength randomization
+        # Motor strength per joint index (not per action slice)
+        self.motor_strength = torch.ones(self.num_envs, self.num_dofs, device=self.device)
         if self.cfg.domain_rand.randomize_motor:
-            self.motor_strength = torch.cat([
-                    torch_rand_float(self.cfg.domain_rand.arm_motor_strength_range[0], self.cfg.domain_rand.arm_motor_strength_range[1], (self.num_envs, 6), device=self.device),
-                    torch_rand_float(self.cfg.domain_rand.leg_motor_strength_range[0], self.cfg.domain_rand.leg_motor_strength_range[1], (self.num_envs, 8), device=self.device)
-                ], dim=1)
-        else:
-            self.motor_strength = torch.ones(self.num_envs, self.num_torques, device=self.device)
+            arm_strength = torch_rand_float(self.cfg.domain_rand.arm_motor_strength_range[0], self.cfg.domain_rand.arm_motor_strength_range[1], (self.num_envs, 6), device=self.device)
+            leg_strength = torch_rand_float(self.cfg.domain_rand.leg_motor_strength_range[0], self.cfg.domain_rand.leg_motor_strength_range[1], (self.num_envs, 8), device=self.device)
+            self.motor_strength[:, self.arm_dof_indices] = arm_strength
+            self.motor_strength[:, self.leg_dof_indices] = leg_strength
 
         # Hip joints for bipedal robot
         hip_names = ["hip_L_Joint", "hip_R_Joint"]
@@ -655,15 +664,11 @@ class LimxRobot(LeggedRobot):
         # First call parent class to initialize dof_pos_limits, dof_vel_limits, torque_limits
         props = super()._process_dof_props(props, env_id)
         
-        # Then modify arm DOF properties
-        for i in range(6):  # First 6 DOFs are arm
-            props['stiffness'][i] = self.cfg.control.stiffness['arm']
-            props['damping'][i] = self.cfg.control.damping['arm']
-            
-        # Modify leg DOF properties
-        for i in range(6, 14):  # DOFs 6-13 are legs
-            props['stiffness'][i] = self.cfg.control.stiffness['leg']
-            props['damping'][i] = self.cfg.control.damping['leg']
+        # Then modify arm/leg DOF properties by name indices
+        props['stiffness'][self.arm_dof_indices.cpu().numpy()] = self.cfg.control.stiffness['arm']
+        props['damping'][self.arm_dof_indices.cpu().numpy()] = self.cfg.control.damping['arm']
+        props['stiffness'][self.leg_dof_indices.cpu().numpy()] = self.cfg.control.stiffness['leg']
+        props['damping'][self.leg_dof_indices.cpu().numpy()] = self.cfg.control.damping['leg']
         
         return props
 
@@ -723,7 +728,7 @@ class LimxRobot(LeggedRobot):
         self.ee_pos = self.rigid_body_state[:, self.gripper_idx, :3]
         self.ee_orn = self.rigid_body_state[:, self.gripper_idx, 3:7]
         self.ee_vel = self.rigid_body_state[:, self.gripper_idx, 7:]
-        self.ee_j_eef = self.jacobian_whole[:, self.gripper_idx, :6, :6]  # Arm joints are first 6
+        self.ee_j_eef = self.jacobian_whole[:, self.gripper_idx, self.arm_dof_indices.to(self.device), :6]
 
         # Box info & target ee info
         self.box_pos = self.box_root_state[:, 0:3]
@@ -820,18 +825,17 @@ class LimxRobot(LeggedRobot):
             self.default_dof_pos[i] = angle
         
         # Set PD gains
-        for i in range(self.num_torques):
+        for i in range(self.num_dofs):
             name = self.dof_names[i]
             found = False
-            for dof_type in self.cfg.control.stiffness.keys():
-                if i < 6 and dof_type == 'arm':  # First 6 are arm joints
-                    self.p_gains[i] = self.cfg.control.stiffness[dof_type]
-                    self.d_gains[i] = self.cfg.control.damping[dof_type]
-                    found = True
-                elif i >= 6 and dof_type == 'leg':  # Last 8 are leg joints
-                    self.p_gains[i] = self.cfg.control.stiffness[dof_type]
-                    self.d_gains[i] = self.cfg.control.damping[dof_type]
-                    found = True
+            if i in self.arm_dof_indices:
+                self.p_gains[i] = self.cfg.control.stiffness['arm']
+                self.d_gains[i] = self.cfg.control.damping['arm']
+                found = True
+            elif i in self.leg_dof_indices:
+                self.p_gains[i] = self.cfg.control.stiffness['leg']
+                self.d_gains[i] = self.cfg.control.damping['leg']
+                found = True
             if not found:
                 self.p_gains[i] = 0.
                 self.d_gains[i] = 0.
@@ -1031,13 +1035,17 @@ class LimxRobot(LeggedRobot):
         """ Compute torques from actions for LIMX robot """
         actions_scaled = actions * self.motor_strength * self.action_scale
         
-        # Arm torques are handled by position control, set to zero (first 6 DOFs)
-        arm_torques = torch.zeros(self.num_envs, 6, device=self.device)
-        
-        # Leg torques (last 8 DOFs)
-        leg_torques = self.p_gains[6:] * (actions_scaled[:, 6:] + self.default_dof_pos[6:] - self.dof_pos[:, 6:]) - self.d_gains[6:] * self.dof_vel[:, 6:]
-        
-        torques = torch.cat([arm_torques, leg_torques], dim=-1)
+        # Arm torques are handled by position control, set to zero on arm dofs
+        torques = torch.zeros(self.num_envs, self.num_dofs, device=self.device)
+        # Leg PD torques on leg dofs
+        leg_actions = actions_scaled[:, 6:]
+        leg_pos = self.dof_pos[:, self.leg_dof_indices]
+        leg_vel = self.dof_vel[:, self.leg_dof_indices]
+        leg_default = self.default_dof_pos[self.leg_dof_indices]
+        leg_p = self.p_gains[self.leg_dof_indices]
+        leg_d = self.d_gains[self.leg_dof_indices]
+        leg_torques = leg_p * (leg_actions + leg_default - leg_pos) - leg_d * leg_vel
+        torques[:, self.leg_dof_indices] = leg_torques
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _control_ik(self, dpose):

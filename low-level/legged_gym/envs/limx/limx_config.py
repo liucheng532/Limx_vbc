@@ -77,9 +77,9 @@ class LimxRoughCfg(LeggedRobotCfg):
     
     class env:
         num_envs = 4096
-        num_actions = 8 + 6  # 8 leg joints + 6 arm joints
-        num_torques = 8 + 6
-        action_delay = 3  # -1 for no delay
+        num_actions = 6 + 8  # 6 arm joints + 8 leg joints (与代码一致)
+        num_torques = 6 + 8
+        action_delay = -1  # 早期去除动作延迟，便于学习稳定
         num_gripper_joints = 0  # No gripper in this model
         num_proprio = 2 + 3 + 14 + 14 + 8 + 2 + 3 + 3 + 3  # Updated for bipedal robot
         num_priv = 5 + 1 + 8  # mass_params(5) + friction(1) + leg_motor_strength(8)
@@ -92,7 +92,7 @@ class LimxRoughCfg(LeggedRobotCfg):
         teleop_mode = False
         record_video = False
         stand_by = False
-        observe_gait_commands = False
+        observe_gait_commands = True  # 启用步态相位与接触塑形
         frequencies = 2
     
     class init_state(LeggedRobotCfg.init_state):
@@ -123,8 +123,8 @@ class LimxRoughCfg(LeggedRobotCfg):
         init_vel_perturb_range = 0.1
     
     class control:
-        stiffness = {'leg': 150, 'arm': 10}  # Higher stiffness for bipedal balance
-        damping = {'leg': 5.0, 'arm': 1.0}
+        stiffness = {'leg': 120, 'arm': 10}
+        damping = {'leg': 3.5, 'arm': 1.0}
         
         adaptive_arm_gains = False
         # action scale: target angle = actionScale * action + defaultAngle
@@ -169,9 +169,9 @@ class LimxRoughCfg(LeggedRobotCfg):
         added_com_range_x = [-0.1, 0.1]
         added_com_range_y = [-0.1, 0.1]
         added_com_range_z = [-0.1, 0.1]
-        randomize_motor = True
-        leg_motor_strength_range = [0.8, 1.2]
-        arm_motor_strength_range = [0.7, 1.3]
+        randomize_motor = False  # 先关闭电机随机化，稳定早期学习
+        leg_motor_strength_range = [0.9, 1.1]
+        arm_motor_strength_range = [0.9, 1.1]
         randomize_gripper_mass = False  # No gripper
         gripper_added_mass_range = [0, 0]
         push_robots = True
@@ -202,8 +202,8 @@ class LimxRoughCfg(LeggedRobotCfg):
         
         class scales:
             # Gait control rewards
-            tracking_contacts_shaped_force = -2.0
-            tracking_contacts_shaped_vel = -2.0
+            tracking_contacts_shaped_force = 2.0  # 奖励函数返回为负，系数取正以形成惩罚
+            tracking_contacts_shaped_vel = 2.0
             feet_air_time = 2.0
             feet_height = 1.0
             
@@ -215,9 +215,9 @@ class LimxRoughCfg(LeggedRobotCfg):
             
             # Stability rewards (more important for bipedal)
             orientation = -2.0
-            base_height = -5.0
-            roll = -3.0
-            pitch = -3.0
+            base_height = -2.0
+            roll = -1.5
+            pitch = -1.5
             
             # Common rewards
             delta_torques = -1.0e-7/4.0
@@ -236,7 +236,7 @@ class LimxRoughCfg(LeggedRobotCfg):
             dof_acc = -7.5e-7
             collision = -10.
             action_rate = -0.015
-            dof_pos_limits = -10.0
+            dof_pos_limits = -5.0
             hip_pos = -0.3
             feet_jerk = -0.0002
             feet_drag = -0.08
